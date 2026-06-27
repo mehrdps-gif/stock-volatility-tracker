@@ -72,12 +72,29 @@ st.title("📊 AI Investment Decision Dashboard")
 # ----------------------------
 @st.cache_data(ttl=3600)
 def load_data(ticker):
-    return yf.download(ticker, period="1y", progress=False)
+    """Download 1y of price data and guarantee single-level columns.
+
+    Newer yfinance versions return a MultiIndex column DataFrame even
+    for a single ticker (e.g. columns like ('Close', 'AAPL')). That
+    breaks data["Close"].rolling(...) etc. because data["Close"] comes
+    back as a DataFrame instead of a Series. We flatten it here.
+    """
+    df = yf.download(ticker, period="1y", progress=False)
+
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    if isinstance(df.columns, pd.MultiIndex):
+        # Drop the ticker level, keep just ("Close", "Open", ...)
+        df.columns = df.columns.get_level_values(0)
+
+    return df
+
 
 def get_stock_news(ticker):
     try:
         stock = yf.Ticker(ticker)
-        news = stock.news
+        news = stock.news or []
 
         headlines = []
         for item in news[:5]:
@@ -88,7 +105,8 @@ def get_stock_news(ticker):
             })
 
         return headlines
-    except:
+    except Exception as e:
+        st.caption(f"Couldn't load news: {e}")
         return []
 
 # ----------------------------
@@ -101,7 +119,7 @@ ticker = st.sidebar.text_input("Stock Symbol", "AAPL").upper().strip()
 comparison_stocks = st.sidebar.multiselect(
     "Compare Stocks",
     ["AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "GOOGL"]
-    
+
 )
 investment = st.sidebar.number_input(
     "💰 Initial Investment ($)",
@@ -112,15 +130,32 @@ investment = st.sidebar.number_input(
 )
 
 # ----------------------------
-# LOAD DATA
+# VALIDATE TICKER INPUT
 # ----------------------------
-data = load_data(ticker)
+if not ticker:
+    st.warning("Please enter a stock symbol.")
+    st.stop()
+
+# ----------------------------
+# LOAD DATA (with error handling — yfinance can raise instead of
+# returning an empty frame for a bad/delisted ticker)
+# ----------------------------
+try:
+    data = load_data(ticker)
+except Exception as e:
+    st.error(f"Could not download data for '{ticker}': {e}")
+    st.stop()
 
 if data.empty:
     st.error("No data found. Check ticker symbol.")
     st.stop()
 
 data = data.dropna()
+
+if data.empty or len(data) < 20:
+    st.error("Not enough price history to compute indicators for this ticker.")
+    st.stop()
+
 # Moving Averages
 data["MA20"] = data["Close"].rolling(20).mean()
 data["MA50"] = data["Close"].rolling(50).mean()
@@ -129,9 +164,6 @@ data["MA50"] = data["Close"].rolling(50).mean()
 # SAFE PRICE FIX
 # ----------------------------
 latest_price = data["Close"].dropna().iloc[-1].item()
-# ----------------------------
-# COMPANY INFO
-#
 
 # ----------------------------
 # RETURNS + VOLATILITY
@@ -139,13 +171,11 @@ latest_price = data["Close"].dropna().iloc[-1].item()
 returns = data["Close"].pct_change().dropna()
 
 volatility = float(np.std(returns) * np.sqrt(252))
-risk_free_rate = 0.05
 
-annual_return = returns.mean() * 252
+risk_free_rate = 0.02
+annual_return = np.mean(returns.to_numpy()) * 252
 
-sharpe_ratio = (
-    annual_return - risk_free_rate
-) / volatility
+sharpe_ratio = (annual_return - risk_free_rate) / volatility
 
 data["Rolling Volatility"] = (
     data["Close"].pct_change().rolling(20).std() * np.sqrt(252)
@@ -164,28 +194,37 @@ else:
 # ----------------------------
 # HEADER METRICS
 # ----------------------------
-col1, col2, col3, col4 = st.columns(4)
-col4.metric(
-    "Sharpe Ratio",
-    f"{sharpe_ratio:.2f}"
-)
 cumulative = (1 + returns).cumprod()
-
 rolling_max = cumulative.cummax()
+drawdown = (cumulative - rolling_max) / rolling_max
+max_drawdown = drawdown.min().item()
 
-drawdown = (
-    cumulative - rolling_max
-) / rolling_max
-
-max_drawdown = drawdown.min()
-st.metric(
-    "Max Drawdown",
-    f"{max_drawdown:.2%}"
-)
-
+col1, col2, col3, col4, col5 = st.columns(5)
 col1.metric("Price", f"${latest_price:.2f}")
 col2.metric("Volatility", f"{volatility:.2%}")
 col3.metric("Risk", risk)
+col4.metric("Sharpe Ratio", f"{sharpe_ratio:.2f}")
+col5.metric("Max Drawdown", f"{max_drawdown:.2%}")
+
+# ----------------------------
+# INVESTMENT GROWTH (uses the "Initial Investment" sidebar input,
+# which previously was collected but never actually used anywhere)
+# ----------------------------
+shares_bought = investment / data["Close"].iloc[0]
+data["Portfolio Value"] = data["Close"] * shares_bought
+current_value = data["Portfolio Value"].iloc[-1]
+profit_loss = current_value - investment
+
+st.subheader("💰 Hypothetical Investment Performance")
+pcol1, pcol2, pcol3 = st.columns(3)
+pcol1.metric("Initial Investment", f"${investment:,.2f}")
+pcol2.metric("Current Value", f"${current_value:,.2f}")
+pcol3.metric(
+    "Profit / Loss",
+    f"${profit_loss:,.2f}",
+    f"{(profit_loss / investment):.2%}"
+)
+st.line_chart(data["Portfolio Value"])
 
 # ----------------------------
 # CHARTS
@@ -200,14 +239,11 @@ st.line_chart(data["Rolling Volatility"])
 # INVESTMENT INSIGHT PANEL
 # ----------------------------
 st.subheader("🧠 Investment Insight Panel")
-st.subheader("🤖 AI Recommendation")
 
 if sharpe_ratio > 1.2 and volatility < 0.30:
     st.success("BUY")
-
 elif sharpe_ratio > 0.5:
     st.info("HOLD")
-
 else:
     st.error("HIGH RISK")
 
@@ -297,13 +333,19 @@ else:
 results = []
 
 for stock in comparison_stocks:
-    df = load_data(stock)
+    try:
+        df = load_data(stock)
+    except Exception:
+        continue
 
     if df.empty:
         continue
 
     df = df.dropna()
     r = df["Close"].pct_change().dropna()
+
+    if r.empty:
+        continue
 
     v = float(np.std(r) * np.sqrt(252))
 
@@ -319,8 +361,11 @@ if results:
     df_comp = df_comp.sort_values("Volatility (%)", ascending=False)
 
     st.dataframe(df_comp, use_container_width=True)
-    with st.expander("📚 Learn Investing"):
-        st.markdown("""
+
+# "Learn Investing" no longer depends on having comparison stocks
+# selected — it's general education content and should always show.
+with st.expander("📚 Learn Investing"):
+    st.markdown("""
 ### Volatility
 Measures how much prices fluctuate.
 
