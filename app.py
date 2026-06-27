@@ -6,9 +6,9 @@ import pandas as pd
 # ----------------------------
 # PAGE CONFIG
 # ----------------------------
-st.set_page_config(
-    page_title="AI Investment Dashboard",
-    layout="wide"
+st.title("🚀 PulseInvest AI")
+st.caption(
+    "An AI-powered investment intelligence platform for retail investors"
 )
 
 # ----------------------------
@@ -101,6 +101,14 @@ ticker = st.sidebar.text_input("Stock Symbol", "AAPL").upper().strip()
 comparison_stocks = st.sidebar.multiselect(
     "Compare Stocks",
     ["AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "GOOGL"]
+    
+)
+investment = st.sidebar.number_input(
+    "💰 Initial Investment ($)",
+    min_value=100,
+    max_value=1000000,
+    value=10000,
+    step=100
 )
 
 # ----------------------------
@@ -113,11 +121,17 @@ if data.empty:
     st.stop()
 
 data = data.dropna()
+# Moving Averages
+data["MA20"] = data["Close"].rolling(20).mean()
+data["MA50"] = data["Close"].rolling(50).mean()
 
 # ----------------------------
 # SAFE PRICE FIX
 # ----------------------------
 latest_price = data["Close"].dropna().iloc[-1].item()
+# ----------------------------
+# COMPANY INFO
+#
 
 # ----------------------------
 # RETURNS + VOLATILITY
@@ -125,6 +139,13 @@ latest_price = data["Close"].dropna().iloc[-1].item()
 returns = data["Close"].pct_change().dropna()
 
 volatility = float(np.std(returns) * np.sqrt(252))
+risk_free_rate = 0.05
+
+annual_return = returns.mean() * 252
+
+sharpe_ratio = (
+    annual_return - risk_free_rate
+) / volatility
 
 data["Rolling Volatility"] = (
     data["Close"].pct_change().rolling(20).std() * np.sqrt(252)
@@ -143,7 +164,24 @@ else:
 # ----------------------------
 # HEADER METRICS
 # ----------------------------
-col1, col2, col3 = st.columns(3)
+col1, col2, col3, col4 = st.columns(4)
+col4.metric(
+    "Sharpe Ratio",
+    f"{sharpe_ratio:.2f}"
+)
+cumulative = (1 + returns).cumprod()
+
+rolling_max = cumulative.cummax()
+
+drawdown = (
+    cumulative - rolling_max
+) / rolling_max
+
+max_drawdown = drawdown.min()
+st.metric(
+    "Max Drawdown",
+    f"{max_drawdown:.2%}"
+)
 
 col1.metric("Price", f"${latest_price:.2f}")
 col2.metric("Volatility", f"{volatility:.2%}")
@@ -154,7 +192,7 @@ col3.metric("Risk", risk)
 # ----------------------------
 st.subheader("📈 Price Trend")
 st.line_chart(data["Close"])
-
+st.line_chart(data[["Close", "MA20", "MA50"]])
 st.subheader("📉 Volatility Trend")
 st.line_chart(data["Rolling Volatility"])
 
@@ -162,6 +200,16 @@ st.line_chart(data["Rolling Volatility"])
 # INVESTMENT INSIGHT PANEL
 # ----------------------------
 st.subheader("🧠 Investment Insight Panel")
+st.subheader("🤖 AI Recommendation")
+
+if sharpe_ratio > 1.2 and volatility < 0.30:
+    st.success("BUY")
+
+elif sharpe_ratio > 0.5:
+    st.info("HOLD")
+
+else:
+    st.error("HIGH RISK")
 
 st.markdown(f"""
 ### About {ticker}
@@ -271,3 +319,23 @@ if results:
     df_comp = df_comp.sort_values("Volatility (%)", ascending=False)
 
     st.dataframe(df_comp, use_container_width=True)
+    with st.expander("📚 Learn Investing"):
+        st.markdown("""
+### Volatility
+Measures how much prices fluctuate.
+
+### Sharpe Ratio
+Measures return earned for each unit of risk.
+
+### Maximum Drawdown
+Largest historical decline.
+
+### Value at Risk
+Estimated worst daily loss at a chosen confidence level.
+
+### Moving Average
+Smooths price data to identify trends.
+
+### Diversification
+Owning multiple assets can reduce portfolio risk because different investments often don't move exactly together.
+""")
